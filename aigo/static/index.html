@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>aiGo</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <aside id="panel">
+    <header class="panel-head">
+      <div class="brand">ai<span>Go</span></div>
+      <div id="conn" class="pill" data-state="disconnected">
+        <span class="dot"></span><span id="conn-text">Starting…</span>
+      </div>
+    </header>
+    <div id="conn-error" class="error-box" hidden>
+      <p id="conn-error-text"></p>
+      <button id="btn-reconnect" class="btn small">Try again</button>
+    </div>
+
+    <section class="block">
+      <div class="now">
+        <div>
+          <div class="label">Phone is reporting</div>
+          <div id="now-pos" class="now-pos">Real location</div>
+        </div>
+        <button id="btn-clear" class="btn danger" title="Stop spoofing and return to your real GPS">Stop spoofing</button>
+      </div>
+    </section>
+
+    <section class="block">
+      <form id="search-form" class="row">
+        <input id="search" type="search" placeholder="Search a place or paste lat, lon" autocomplete="off">
+        <button class="btn" type="submit">Find</button>
+      </form>
+      <ul id="search-results" class="list" hidden></ul>
+    </section>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="teleport" role="tab">Teleport</button>
+      <button class="tab" data-tab="route" role="tab">Route</button>
+      <button class="tab" data-tab="joystick" role="tab">Joystick</button>
+    </nav>
+
+    <section class="block tab-body" data-body="teleport">
+      <p class="hint">Click anywhere on the map, then choose <b>Teleport here</b>.</p>
+      <div class="sub-head">
+        <h3>Favorites</h3>
+        <button id="btn-save-fav" class="btn small ghost">Save current</button>
+      </div>
+      <ul id="favorites" class="list"><li class="empty">No favorites yet.</li></ul>
+      <h3>Recent</h3>
+      <ul id="history" class="list"><li class="empty">Nothing yet.</li></ul>
+    </section>
+
+    <section class="block tab-body" data-body="route" hidden>
+      <p class="hint">Click the map to add stops. The phone travels there from where it is now.</p>
+      <div class="route-stats">
+        <span id="route-count">0 stops</span><span id="route-dist">0 km</span><span id="route-eta">—</span>
+      </div>
+      <div class="speed-group" data-speed-group></div>
+      <label class="check"><input id="route-loop" type="checkbox"> Loop back to the start</label>
+      <div class="row">
+        <button id="btn-route-start" class="btn primary grow">Start route</button>
+        <button id="btn-route-undo" class="btn ghost">Undo</button>
+        <button id="btn-route-reset" class="btn ghost">Reset</button>
+      </div>
+      <div id="route-progress" class="progress" hidden>
+        <div class="bar"><div id="route-bar"></div></div>
+        <div class="row between">
+          <span id="route-progress-text"></span>
+          <button id="btn-route-stop" class="btn small">Stop</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="block tab-body" data-body="joystick" hidden>
+      <p class="hint">Hold arrow keys or W A S D, or press and hold the pad.</p>
+      <div class="speed-group" data-speed-group></div>
+      <div class="pad">
+        <button data-dir="0" class="up" aria-label="North">▲</button>
+        <button data-dir="270" class="left" aria-label="West">◀</button>
+        <button data-dir="90" class="right" aria-label="East">▶</button>
+        <button data-dir="180" class="down" aria-label="South">▼</button>
+      </div>
+    </section>
+  </aside>
+
+  <div id="toast" role="status" hidden></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
