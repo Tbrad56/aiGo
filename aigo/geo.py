@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Callable, Iterator, Optional
 
 LatLon = tuple[float, float]
 
@@ -48,30 +49,43 @@ def _lerp(a: LatLon, b: LatLon, f: float) -> LatLon:
     return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
 
 
-def route_positions(points: list[LatLon], step_m: float) -> list[LatLon]:
-    """Positions spaced `step_m` apart along the polyline `points`, ending exactly on the last point.
+def walk_path(points: list[LatLon], next_step: Callable[[], float]) -> Iterator[LatLon]:
+    """Yield positions along the polyline `points`, each `next_step()` meters past the previous one.
 
-    The first point is not included: callers are already standing on it.
+    The first point is not yielded (callers already stand on it); the last point always is.
     """
-    if step_m <= 0:
-        raise ValueError("step_m must be positive")
     if len(points) < 2:
-        return list(points[-1:])
+        yield from points[-1:]
+        return
 
-    out: list[LatLon] = []
-    carried = 0.0  # distance already travelled since the last emitted position
+    last: Optional[LatLon] = None
+    need = _positive(next_step())  # meters still to go before the next position
     for a, b in zip(points, points[1:]):
         seg = distance_m(a, b)
         if seg == 0:
             continue
-        pos = step_m - carried
-        while pos <= seg:
-            out.append(_lerp(a, b, pos / seg))
-            pos += step_m
-        carried = seg - (pos - step_m)
-    if not out or distance_m(out[-1], points[-1]) > 1e-6:
-        out.append(points[-1])
-    return out
+        pos = 0.0
+        while seg - pos >= need:
+            pos += need
+            last = _lerp(a, b, pos / seg)
+            yield last
+            need = _positive(next_step())
+        need -= seg - pos
+    if last is None or distance_m(last, points[-1]) > 1e-6:
+        yield points[-1]
+
+
+def _positive(step: float) -> float:
+    if step <= 0:
+        raise ValueError("step must be positive")
+    return step
+
+
+def route_positions(points: list[LatLon], step_m: float) -> list[LatLon]:
+    """Positions spaced `step_m` apart along `points`, ending exactly on the last point."""
+    if step_m <= 0:
+        raise ValueError("step_m must be positive")
+    return list(walk_path(points, lambda: step_m))
 
 
 def path_length_m(points: list[LatLon]) -> float:

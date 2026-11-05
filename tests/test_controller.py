@@ -149,3 +149,37 @@ async def test_shutdown_clears_and_closes(tmp_path):
     await ctl.shutdown()
     names = [c[0] for c in dev.calls]
     assert names[-2:] == ["clear", "close"]
+
+
+async def test_route_speed_variation_changes_step_sizes(tmp_path):
+    import random
+
+    ctl, dev, _ = make(tmp_path)
+    ctl.rng = random.Random(42)
+    await ctl.connect()
+    await ctl.teleport(*TIMES_SQUARE)
+    await ctl.start_route([EMPIRE_STATE], speed_kmh=36, variation=0.2)  # base 10 m per tick
+    await ctl.wait_route()
+    sets = [c[1:] for c in dev.calls if c[0] == "set"]
+    steps = [distance_m(a, b) for a, b in zip(sets, sets[1:])][:-1]  # last step is a remainder
+    assert dev.location == EMPIRE_STATE
+    assert min(steps) >= 8 - 1e-6 and max(steps) <= 12 + 1e-6
+    assert max(steps) - min(steps) > 1  # actually varies
+
+
+async def test_route_rejects_bad_variation(tmp_path):
+    ctl, _, _ = make(tmp_path)
+    await ctl.connect()
+    with pytest.raises(ValueError):
+        await ctl.start_route([TIMES_SQUARE, EMPIRE_STATE], speed_kmh=5, variation=0.9)
+
+
+async def test_route_from_track_start_jumps_there_first(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    await ctl.connect()
+    await ctl.teleport(*LONDON)
+    await ctl.start_route([TIMES_SQUARE, EMPIRE_STATE], speed_kmh=360, from_current=False)
+    await ctl.wait_route()
+    sets = [c[1:] for c in dev.calls if c[0] == "set"]
+    assert sets[1] == TIMES_SQUARE  # jumped to the track start, not walked from London
+    assert dev.location == EMPIRE_STATE

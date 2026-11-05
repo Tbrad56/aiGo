@@ -61,9 +61,19 @@ const state = {
   status: null,
   tab: "teleport",
   speed: Number(localGet("aigo.speed")) || 5,
-  route: [],
+  route: [],          // stops the user clicked (or an imported track)
+  imported: false,    // route came from a GPX file: start at its first point
+  path: [],           // planned path drawn on the map (follows roads when enabled)
+  pathNote: "",
+  pathSeq: 0,
+  activePath: null,   // path of the route currently running
+  followRoads: localGet("aigo.roads") !== "0",
+  vary: localGet("aigo.vary") !== "0",
+  lastPosKey: "",
+  wasRunning: false,
   centered: false,
 };
+const VARIATION = 0.15;
 
 function localGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function localSet(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
@@ -73,7 +83,7 @@ const map = L.map("map", { zoomControl: false }).setView([39.5, -98.35], 4);
 L.control.zoom({ position: "topright" }).addTo(map);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · Routes <a href="https://routing.openstreetmap.de/">FOSSGIS OSRM</a>',
 }).addTo(map);
 
 const phoneMarker = L.circleMarker([0, 0], {
@@ -89,7 +99,8 @@ map.on("click", (e) => {
   const lon = ((lng + 540) % 360) - 180;
   if (state.tab === "route") {
     state.route.push([lat, lon]);
-    renderRoute();
+    drawRoute();         // show the new stop right away
+    schedulePath(250);   // then re-plan (debounced, so quick clicks make one road request)
     return;
   }
   openPick(lat, lon);
@@ -120,12 +131,27 @@ async function teleport(lat, lon) {
 }
 
 async function travelTo(lat, lon) {
-  if (!state.status || !state.status.position) {
+  const start = startPoint();
+  if (!start) {
     toast("Teleport somewhere first, then travel from there.", "warn");
     return;
   }
-  const res = await act(() => api("/api/route", { body: { points: [{ lat, lon }], speed_kmh: state.speed } }));
-  if (res) toast(`On the way: ${km(res.total_m)}, about ${dur(res.eta_s)}`);
+  let pts = [start, [lat, lon]];
+  let note = "";
+  if (state.followRoads) {
+    try { pts = await roadPath(pts, state.speed); }
+    catch (e) { note = ` (${e.message} Going in a straight line.)`; }
+  }
+  pts = decimate(pts, MAX_SEND_POINTS);
+  const res = await act(() => api("/api/route", { body: {
+    points: pts.map(([la, lo]) => ({ lat: la, lon: lo })),
+    speed_kmh: state.speed,
+    variation: state.vary ? VARIATION : 0,
+  } }));
+  if (!res) return;
+  state.activePath = [start, ...pts];
+  drawRoute();
+  toast(`On the way: ${km(res.total_m)}, about ${dur(res.eta_s)}${note}`, note ? "warn" : "");
 }
 
 async function saveFavorite(lat, lon, suggested = "") {
@@ -154,7 +180,8 @@ function setTab(tab) {
   $$(".tab-body").forEach((b) => (b.hidden = b.dataset.body !== tab));
   map.getContainer().style.cursor = tab === "route" ? "crosshair" : "";
   if (tab !== "joystick") stopJoystick();
-  renderRoute();
+  if (tab === "route") schedulePath(0);
+  else drawRoute();
 }
 
 // ---------- speed ----------
@@ -167,46 +194,230 @@ function renderSpeeds() {
       state.speed = Number(b.dataset.kmh);
       localSet("aigo.speed", state.speed);
       renderSpeeds();
-      renderRoute();
+      if (state.followRoads) schedulePath(0);  // walking and driving take different roads
+      else drawRoute();
     }));
   });
 }
 
 // ---------- route ----------
-function routePath() {
-  const p = state.status && state.status.position;
-  return p ? [[p.lat, p.lon], ...state.route] : state.route.slice();
+const ROUTER = "https://routing.openstreetmap.de";
+const MAX_ROAD_WAYPOINTS = 100;
+const MAX_SEND_POINTS = 20000;
+const MAX_STOP_MARKERS = 60;
+
+const routerProfile = (kmh) => (kmh <= 12 ? "routed-foot" : kmh <= 25 ? "routed-bike" : "routed-car");
+
+// Ask OSRM for a path along real roads through `waypoints` ([[lat, lon], ...]).
+async function roadPath(waypoints, kmh) {
+  const coords = waypoints.map(([lat, lon]) => `${lon.toFixed(6)},${lat.toFixed(6)}`).join(";");
+  const url = `${ROUTER}/${routerProfile(kmh)}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+  let data;
+  try {
+    const res = await fetch(url);
+    data = await res.json();
+  } catch {
+    throw new Error("Couldn't reach the road routing service.");
+  }
+  if (data.code !== "Ok" || !data.routes || !data.routes.length) throw new Error("No road route found there.");
+  return data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
 }
 
-function renderRoute() {
-  const path = routePath();
-  const loop = $("#route-loop").checked;
-  const full = loop && path.length > 1 ? [...path, path[0]] : path;
-  const showRoute = state.tab === "route" || state.status?.mode === "route";
-  routeLine.setLatLngs(showRoute ? full : []);
+// Keep at most `max` points, always keeping the first and last.
+function decimate(pts, max) {
+  if (pts.length <= max) return pts;
+  const stride = Math.ceil((pts.length - 1) / (max - 1));
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i += stride) out.push(pts[i]);
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+function pathLength(pts) {
+  let d = 0;
+  for (let i = 1; i < pts.length; i++) d += haversine(pts[i - 1], pts[i]);
+  return d;
+}
+
+function startPoint() {
+  const p = state.status && state.status.position;
+  return p ? [p.lat, p.lon] : null;
+}
+
+// Straight-line plan: from where the phone is (unless it's an imported track) through the stops.
+function straightPath() {
+  const start = startPoint();
+  const path = start && !state.imported ? [start, ...state.route] : state.route.slice();
+  return $("#route-loop").checked && path.length > 1 ? [...path, path[0]] : path;
+}
+
+let pathTimer = null;
+function schedulePath(delay = 400) {
+  clearTimeout(pathTimer);
+  pathTimer = setTimeout(computePath, delay);
+}
+
+async function computePath() {
+  clearTimeout(pathTimer);
+  const seq = ++state.pathSeq;
+  const straight = straightPath();
+  state.path = straight;
+  state.pathNote = "";
+  if (state.followRoads && straight.length >= 2) {
+    if (straight.length > MAX_ROAD_WAYPOINTS) {
+      state.pathNote = "Too many stops to follow roads, so this uses straight lines.";
+    } else {
+      state.pathNote = "Finding roads…";
+      drawRoute();
+      try {
+        const road = await roadPath(straight, state.speed);
+        if (seq !== state.pathSeq) return;  // a newer plan replaced this one
+        state.path = road;
+        state.pathNote = "";
+      } catch (e) {
+        if (seq !== state.pathSeq) return;
+        state.pathNote = `${e.message} Using straight lines.`;
+      }
+    }
+  }
+  drawRoute();
+}
+
+const stopIcon = (n) => L.divIcon({
+  className: "",
+  html: `<div class="stop-pin">${n}</div>`,
+  iconSize: [22, 22],
+  iconAnchor: [11, 11],
+});
+
+function drawRoute() {
+  const running = state.status && state.status.mode === "route";
+  const show = running || state.tab === "route";
+  routeLine.setLatLngs(show ? (running && state.activePath ? state.activePath : state.path) : []);
   routeStops.clearLayers();
-  if (showRoute) state.route.forEach((pt, i) =>
-    L.marker(pt, {
-      icon: L.divIcon({ className: "", html: `<div style="background:#2f6fec;color:#fff;border-radius:50%;width:22px;height:22px;display:grid;place-items:center;font:600 11px system-ui;border:2px solid #fff;box-shadow:0 1px 4px #0006">${i + 1}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
-    }).addTo(routeStops)
-  );
-  let dist = 0;
-  for (let i = 1; i < full.length; i++) dist += haversine(full[i - 1], full[i]);
-  $("#route-count").textContent = `${state.route.length} stop${state.route.length === 1 ? "" : "s"}`;
+  if (show && state.route.length <= MAX_STOP_MARKERS) {
+    state.route.forEach((pt, i) => {
+      const marker = L.marker(pt, { icon: stopIcon(i + 1), title: `Stop ${i + 1}` }).addTo(routeStops);
+      marker.on("click", () => openStopMenu(pt));
+    });
+  }
+  const dist = pathLength(state.path);
+  const n = state.route.length;
+  $("#route-count").textContent = state.imported ? `${n} track points` : `${n} stop${n === 1 ? "" : "s"}`;
   $("#route-dist").textContent = km(dist);
   $("#route-eta").textContent = dist ? dur(dist / (state.speed / 3.6)) : "—";
+  $("#route-note").textContent = state.pathNote;
+  $("#route-note").hidden = !state.pathNote;
 }
-$("#route-loop").onchange = renderRoute;
-$("#btn-route-undo").onclick = () => { state.route.pop(); renderRoute(); };
-$("#btn-route-reset").onclick = () => { state.route = []; renderRoute(); };
+
+// Popup for a stop pin. Keyed by the point itself (not its index) so it stays right if stops change.
+function openStopMenu(pt) {
+  const i = state.route.indexOf(pt);
+  if (i < 0) return;
+  const el = document.createElement("div");
+  el.innerHTML = `<b>Stop ${i + 1}</b><br><span class="coords">${fmt(pt[0], pt[1])}</span>
+    <div class="popup-actions"><button class="btn danger" data-act="remove">Remove stop</button></div>`;
+  el.querySelector('[data-act="remove"]').onclick = () => { map.closePopup(); removeStop(pt); };
+  L.popup({ offset: [0, -6] }).setLatLng(pt).setContent(el).openOn(map);
+}
+
+function removeStop(pt) {
+  const i = state.route.indexOf(pt);
+  if (i < 0) return;
+  state.route.splice(i, 1);
+  if (!state.route.length) state.imported = false;
+  drawRoute();
+  schedulePath(150);
+}
+
+// Called on every live status update.
+function routeOnStatus(s) {
+  const running = s.mode === "route";
+  if (state.wasRunning && !running) state.activePath = null;
+  state.wasRunning = running;
+  const posKey = s.position ? `${s.position.lat.toFixed(5)},${s.position.lon.toFixed(5)}` : "";
+  if (posKey !== state.lastPosKey) {
+    state.lastPosKey = posKey;
+    // The plan starts where the phone is, so re-plan when it moves (not while a route is driving it).
+    if (!running && state.tab === "route" && state.route.length) return schedulePath(800);
+  }
+  drawRoute();
+}
+
+function resetRoute() {
+  state.route = [];
+  state.imported = false;
+  computePath();
+}
+
+$("#route-roads").checked = state.followRoads;
+$("#route-vary").checked = state.vary;
+$("#route-roads").onchange = (e) => {
+  state.followRoads = e.target.checked;
+  localSet("aigo.roads", state.followRoads ? "1" : "0");
+  computePath();
+};
+$("#route-vary").onchange = (e) => {
+  state.vary = e.target.checked;
+  localSet("aigo.vary", state.vary ? "1" : "0");
+};
+$("#route-loop").onchange = () => computePath();
+$("#btn-route-undo").onclick = () => {
+  state.route.pop();
+  if (!state.route.length) state.imported = false;
+  computePath();
+};
+$("#btn-route-reset").onclick = resetRoute;
+
 $("#btn-route-start").onclick = async () => {
   if (!state.route.length) return toast("Click the map to add at least one stop.", "warn");
-  const res = await act(() => api("/api/route", {
-    body: { points: state.route.map(([lat, lon]) => ({ lat, lon })), speed_kmh: state.speed, loop: $("#route-loop").checked },
-  }));
-  if (res) toast(`Route started: ${km(res.total_m)}, about ${dur(res.eta_s)}`);
+  await computePath();  // make sure the plan matches what's on screen now
+  const pts = decimate(state.path, MAX_SEND_POINTS);
+  const res = await act(() => api("/api/route", { body: {
+    points: pts.map(([lat, lon]) => ({ lat, lon })),
+    speed_kmh: state.speed,
+    loop: $("#route-loop").checked,
+    variation: state.vary ? VARIATION : 0,
+    from_current: !state.imported,
+  } }));
+  if (!res) return;
+  const start = startPoint();
+  state.activePath = start && !state.imported ? [start, ...pts] : pts;
+  drawRoute();
+  toast(`Route started: ${km(res.total_m)}, about ${dur(res.eta_s)}`);
 };
 $("#btn-route-stop").onclick = () => act(() => api("/api/route/stop", { body: {} }));
+
+// ---------- GPX import ----------
+function parseGpx(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length) throw new Error("That file isn't valid GPX.");
+  let nodes = doc.getElementsByTagName("trkpt");
+  if (!nodes.length) nodes = doc.getElementsByTagName("rtept");
+  if (!nodes.length) nodes = doc.getElementsByTagName("wpt");
+  const pts = Array.from(nodes)
+    .map((n) => [Number(n.getAttribute("lat")), Number(n.getAttribute("lon"))])
+    .filter(([lat, lon]) => isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180);
+  if (pts.length < 2) throw new Error("No track points found in that file.");
+  return pts;
+}
+
+$("#gpx-file").onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  let pts;
+  try { pts = parseGpx(await file.text()); }
+  catch (err) { return toast(err.message, "error"); }
+  state.route = pts;
+  state.imported = true;
+  // A recorded track already follows the roads it was recorded on.
+  state.followRoads = false;
+  $("#route-roads").checked = false;
+  setTab("route");
+  map.fitBounds(L.latLngBounds(pts).pad(0.1));
+  toast(`Imported ${pts.length} points from ${file.name}. The route starts at the track's first point.`);
+};
 
 // ---------- joystick ----------
 const KEY_DIRS = { ArrowUp: "n", KeyW: "n", ArrowDown: "s", KeyS: "s", ArrowLeft: "w", KeyA: "w", ArrowRight: "e", KeyD: "e" };
@@ -392,7 +603,7 @@ function renderStatus(s) {
     $("#route-bar").style.width = `${pct}%`;
     $("#route-progress-text").textContent = `${km(r.done_m)} of ${km(r.total_m)} · ${dur(r.eta_s)} left`;
   }
-  renderRoute();
+  routeOnStatus(s);
 }
 
 let wsDelay = 500;

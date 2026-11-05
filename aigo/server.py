@@ -26,9 +26,11 @@ class Point(BaseModel):
 
 
 class RouteRequest(BaseModel):
-    points: list[Point] = Field(min_length=1, max_length=5000)
+    points: list[Point] = Field(min_length=1, max_length=20000)
     speed_kmh: float = Field(gt=0, le=1000)
     loop: bool = False
+    variation: float = Field(default=0.0, ge=0, le=0.5)
+    from_current: bool = True
 
 
 class StepRequest(BaseModel):
@@ -92,7 +94,8 @@ def create_app(controller: Controller, *, connect_on_start: bool = True) -> Fast
 
     @app.post("/api/route")
     async def route(r: RouteRequest):
-        result = await run(controller.start_route([(p.lat, p.lon) for p in r.points], r.speed_kmh, r.loop))
+        points = [(p.lat, p.lon) for p in r.points]
+        result = await run(controller.start_route(points, r.speed_kmh, r.loop, r.variation, r.from_current))
         return {**result, "status": controller.status()}
 
     @app.post("/api/route/stop")

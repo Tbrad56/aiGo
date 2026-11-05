@@ -79,3 +79,17 @@ def test_websocket_sends_status(client):
         while msg["position"] is None:
             msg = ws.receive_json()
         assert msg["position"] == {"lat": 5, "lon": 6}
+
+
+def test_route_accepts_variation_and_track_start(client):
+    client.post("/api/teleport", json={"lat": 40.758, "lon": -73.9855})
+    body = {
+        "points": [{"lat": 40.75, "lon": -73.98}, {"lat": 40.7484, "lon": -73.9857}],
+        "speed_kmh": 5,
+        "variation": 0.15,
+        "from_current": False,
+    }
+    r = client.post("/api/route", json=body)
+    assert r.status_code == 200
+    assert client.post("/api/route", json={**body, "variation": 0.9}).status_code == 422
+    client.post("/api/route/stop")

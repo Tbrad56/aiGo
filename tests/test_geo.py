@@ -56,3 +56,30 @@ def test_route_positions_single_point():
 def test_route_positions_rejects_bad_step():
     with pytest.raises(ValueError):
         route_positions([TIMES_SQUARE, EMPIRE_STATE], 0)
+
+
+def test_walk_path_uses_each_step_from_the_function():
+    from aigo.geo import walk_path
+
+    a, b = (0.0, 0.0), destination((0.0, 0.0), 90, 100)
+    steps = iter([10, 20, 30])
+    pts = list(walk_path([a, b], lambda: next(steps, 40)))
+    # 10, 30, 60, then 40 more would overshoot 100 -> final point
+    got = [round(distance_m(a, p)) for p in pts]
+    assert got == [10, 30, 60, 100]
+    assert distance_m(pts[-1], b) < 1e-6
+
+
+def test_walk_path_matches_route_positions_for_constant_step():
+    from aigo.geo import walk_path
+
+    pts = [TIMES_SQUARE, EMPIRE_STATE, destination(EMPIRE_STATE, 120, 333)]
+    assert list(walk_path(pts, lambda: 50)) == route_positions(pts, 50)
+
+
+def test_walk_path_rejects_non_positive_step():
+    from aigo.geo import walk_path
+
+    with pytest.raises(ValueError):
+        list(walk_path([TIMES_SQUARE, EMPIRE_STATE], lambda: 0))
+

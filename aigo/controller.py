@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 import time
 from typing import Any, Awaitable, Callable, Optional
 
 from aigo.device import DeviceError, LocationDevice
-from aigo.geo import LatLon, destination, distance_m, path_length_m, route_positions
+from aigo.geo import LatLon, destination, distance_m, path_length_m, walk_path
 from aigo.store import Store
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class Controller:
         self._sleep = sleep
         self._clock = clock
         self.fake = fake
+        self.rng = random.Random()
 
         self.connection = "disconnected"  # disconnected | connecting | connected | error
         self.error: Optional[str] = None
@@ -155,10 +157,24 @@ class Controller:
         self.mode = "holding"
         self._notify()
 
-    async def start_route(self, points: list[LatLon], speed_kmh: float, loop: bool = False) -> dict[str, Any]:
+    async def start_route(
+        self,
+        points: list[LatLon],
+        speed_kmh: float,
+        loop: bool = False,
+        variation: float = 0.0,
+        from_current: bool = True,
+    ) -> dict[str, Any]:
+        """Travel along `points` at `speed_kmh`.
+
+        `variation` (0-0.5) randomly varies each step's length by up to that fraction, so the pace
+        isn't perfectly even. With `from_current=False` (e.g. a GPX track) the phone jumps to the
+        first point instead of travelling there from where it is."""
         if speed_kmh <= 0:
             raise ValueError("Speed must be above 0.")
-        if self.position is not None:
+        if not 0 <= variation <= 0.5:
+            raise ValueError("Speed variation must be between 0 and 0.5.")
+        if from_current and self.position is not None:
             points = [self.position, *points]
         if len(points) < 2:
             raise ValueError("A route needs at least two points.")
@@ -175,12 +191,16 @@ class Controller:
             "loop": loop,
             "eta_s": length / speed_mps,
         }
-        self._route_task = asyncio.create_task(self._run_route(points, speed_mps, loop))
+        self._route_task = asyncio.create_task(self._run_route(points, speed_mps, loop, variation))
         self._notify()
         return {"total_m": length, "eta_s": length / speed_mps}
 
-    async def _run_route(self, points: list[LatLon], speed_mps: float, loop: bool) -> None:
-        step_m = speed_mps * self.interval
+    async def _run_route(self, points: list[LatLon], speed_mps: float, loop: bool, variation: float) -> None:
+        base_m = speed_mps * self.interval
+
+        def next_step() -> float:
+            return base_m * (1 + self.rng.uniform(-variation, variation)) if variation else base_m
+
         try:
             if self.position is None or distance_m(self.position, points[0]) > 1:
                 await self._set(points[0])
@@ -188,7 +208,7 @@ class Controller:
                 total = path_length_m(points)
                 done = 0.0
                 prev = points[0]
-                for pos in route_positions(points, step_m):
+                for pos in walk_path(points, next_step):
                     await self._sleep(self.interval)
                     await self._set(pos)
                     done += distance_m(prev, pos)

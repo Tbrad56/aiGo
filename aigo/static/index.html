@@ -59,16 +59,22 @@
     </section>
 
     <section class="block tab-body" data-body="route" hidden>
-      <p class="hint">Click the map to add stops. The phone travels there from where it is now.</p>
+      <p class="hint">Click the map to add stops. Click a numbered pin to remove it. The phone travels there from where it is now.</p>
       <div class="route-stats">
         <span id="route-count">0 stops</span><span id="route-dist">0 km</span><span id="route-eta">—</span>
       </div>
+      <p id="route-note" class="note" hidden></p>
       <div class="speed-group" data-speed-group></div>
+      <label class="check"><input id="route-roads" type="checkbox"> Follow roads <span class="aside">(also used by Travel here)</span></label>
+      <label class="check"><input id="route-vary" type="checkbox"> Vary speed slightly</label>
       <label class="check"><input id="route-loop" type="checkbox"> Loop back to the start</label>
       <div class="row">
         <button id="btn-route-start" class="btn primary grow">Start route</button>
         <button id="btn-route-undo" class="btn ghost">Undo</button>
         <button id="btn-route-reset" class="btn ghost">Reset</button>
+      </div>
+      <div class="row">
+        <label class="btn ghost file-btn grow">Import GPX file<input id="gpx-file" type="file" accept=".gpx,application/gpx+xml"></label>
       </div>
       <div id="route-progress" class="progress" hidden>
         <div class="bar"><div id="route-bar"></div></div>
