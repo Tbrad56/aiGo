@@ -13,6 +13,19 @@ from typing import Optional, Protocol
 log = logging.getLogger(__name__)
 
 
+# Modules RealDevice imports lazily. Kept in one list so `--self-check` can verify a packaged build.
+REAL_DEVICE_MODULES = (
+    "pymobiledevice3.exceptions",
+    "pymobiledevice3.remote.remote_service_discovery",
+    "pymobiledevice3.remote.remotexpc",
+    "pymobiledevice3.remote.userspace_tunnel",
+    "pymobiledevice3.services.mobile_image_mounter",
+    "pymobiledevice3.services.dvt.instruments.dvt_provider",
+    "pymobiledevice3.services.dvt.instruments.location_simulation",
+    "pmd_pytcp",
+)
+
+
 class DeviceError(Exception):
     """A problem talking to the phone, with a message fit to show the user."""
 

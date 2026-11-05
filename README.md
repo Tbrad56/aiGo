@@ -38,9 +38,20 @@ to the phone itself. Press Ctrl+C in the terminal to quit; the phone goes back t
 | `--port N` | Use another local port |
 | `--no-browser` | Don't open the browser |
 | `-v` | Debug logs |
+| `--self-check` | Check that every phone component loads, then exit |
 
 If the built-in connection ever fails, use the admin tunnel route: start `lockdown start-tunnel` in an
 Administrator PowerShell, then run `py -3.12 -m aigo --rsd <address> <port>` with the address and port it prints.
+
+## Standalone app (aiGo.exe)
+
+Double-click `build_exe.bat`. A few minutes later you have `dist\aiGo\aiGo.exe` (keep it inside
+its `aiGo` folder, which holds the files it needs). Double-click the exe to start aiGo; no Python
+commands needed. Close its window, or press Ctrl+C in it, to quit.
+
+- Launching it again while it's running just reopens the map page.
+- `aiGo.exe --self-check` confirms every phone component loads, which helps if the exe misbehaves.
+- After changing the code, run `build_exe.bat` again.
 
 ## Using it
 
