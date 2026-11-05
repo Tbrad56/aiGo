@@ -5,6 +5,7 @@ Only this module imports pymobiledevice3, so an iOS or library change is fixed h
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
@@ -22,8 +23,14 @@ REAL_DEVICE_MODULES = (
     "pymobiledevice3.services.mobile_image_mounter",
     "pymobiledevice3.services.dvt.instruments.dvt_provider",
     "pymobiledevice3.services.dvt.instruments.location_simulation",
+    "pymobiledevice3.usbmux",
     "pmd_pytcp",
 )
+
+
+# A dropped Wi-Fi link can make calls hang rather than fail; these bound how long we wait.
+CONNECT_TIMEOUT_S = 90  # generous: the first disk-image mount after a phone restart is slow on Wi-Fi
+COMMAND_TIMEOUT_S = 10
 
 
 class DeviceError(Exception):
@@ -36,6 +43,7 @@ class DeviceInfo:
     ios: str = ""
     model: str = ""
     udid: str = ""
+    transport: str = ""  # "USB", "Wi-Fi", "tunnel" (--rsd) or "pretend"
 
 
 class LocationDevice(Protocol):
@@ -54,7 +62,9 @@ class LocationDevice(Protocol):
 class FakeDevice:
     """Pretend phone: records every call. Used for tests and `--fake` mode."""
 
-    info: DeviceInfo = field(default_factory=lambda: DeviceInfo("Pretend iPhone", "26.1", "iPhone15,2", "FAKE"))
+    info: DeviceInfo = field(
+        default_factory=lambda: DeviceInfo("Pretend iPhone", "26.1", "iPhone15,2", "FAKE", "pretend")
+    )
     fail_connect: Optional[str] = None
     fail_next_set: int = 0  # number of upcoming set_location calls that should fail
     connected: bool = False
@@ -98,10 +108,10 @@ def _friendly(exc: BaseException) -> str:
         "PasswordRequiredError": "Unlock your iPhone and try again.",
         "PairingDialogResponsePendingError": "Tap Trust on your iPhone, then try again.",
         "UserDeniedPairingError": "The iPhone refused to trust this PC. Unplug, replug and tap Trust.",
-        "ConnectionTerminatedError": "The connection to the iPhone dropped. Keep it unlocked and on USB.",
+        "ConnectionTerminatedError": "The connection to the iPhone dropped. Keep it unlocked and on USB or Wi-Fi.",
+        "TimeoutError": "The iPhone stopped responding. Keep it unlocked, and plugged in or on the same Wi-Fi.",
         "ConnectionFailedToUsbmuxdError": (
-            "Apple's device service isn't running. Open the Apple Devices app, or run "
-            "`Get-Service *apple* | Restart-Service` in an admin PowerShell."
+            "Apple's device service isn't running. Open the Apple Devices app, then click Try again."
         ),
     }
     if name in hints:
@@ -132,32 +142,42 @@ class RealDevice:
         await self.close()
         stack = contextlib.AsyncExitStack()
         try:
-            rsd = await self._open_rsd(stack)
-            self.info = DeviceInfo(
-                name=await _safe_value(rsd, "DeviceName"),
-                ios=getattr(rsd, "product_version", "") or "",
-                model=getattr(rsd, "product_type", "") or "",
-                udid=getattr(rsd, "udid", "") or "",
-            )
-            if self.mount:
-                await self._auto_mount(rsd)
-
-            from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
-            from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
-
-            dvt = await stack.enter_async_context(DvtProvider(rsd))
-            self._location_sim = await stack.enter_async_context(LocationSimulation(dvt))
+            await asyncio.wait_for(self._connect_steps(stack), CONNECT_TIMEOUT_S)
         except DeviceError:
             await stack.aclose()
             raise
         except Exception as exc:  # pymobiledevice3 raises many exception types
+            self._location_sim = None
             log.error("connect failed: %r", exc)
             log.debug("connect failure details", exc_info=True)
             with contextlib.suppress(Exception):
                 await stack.aclose()
             raise DeviceError(_friendly(exc)) from exc
         self._stack = stack
-        log.info("connected to %s (iOS %s)", self.info.name or self.info.udid, self.info.ios)
+        log.info(
+            "connected to %s (iOS %s) over %s",
+            self.info.name or self.info.udid,
+            self.info.ios,
+            self.info.transport or "unknown link",
+        )
+
+    async def _connect_steps(self, stack: contextlib.AsyncExitStack) -> None:
+        rsd = await self._open_rsd(stack)
+        self.info = DeviceInfo(
+            name=await _safe_value(rsd, "DeviceName"),
+            ios=getattr(rsd, "product_version", "") or "",
+            model=getattr(rsd, "product_type", "") or "",
+            udid=getattr(rsd, "udid", "") or "",
+            transport=await self._transport(getattr(rsd, "udid", None)),
+        )
+        if self.mount:
+            await self._auto_mount(rsd)
+
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
+
+        dvt = await stack.enter_async_context(DvtProvider(rsd))
+        self._location_sim = await stack.enter_async_context(LocationSimulation(dvt))
 
     async def _open_rsd(self, stack: contextlib.AsyncExitStack):
         if self.rsd_address is not None:
@@ -177,6 +197,18 @@ class RealDevice:
         stack.push_async_callback(tunnel.aclose)
         return rsd
 
+    async def _transport(self, udid: Optional[str]) -> str:
+        """How the phone is reached. The tunnel picks USB when available, else Wi-Fi (same rule)."""
+        if self.rsd_address is not None:
+            return "tunnel"
+        with contextlib.suppress(Exception):
+            from pymobiledevice3.usbmux import select_device
+
+            mux = await select_device(udid=udid)
+            if mux is not None:
+                return "USB" if mux.is_usb else "Wi-Fi"
+        return ""
+
     @staticmethod
     async def _auto_mount(rsd) -> None:
         from pymobiledevice3.exceptions import AlreadyMountedError
@@ -192,7 +224,7 @@ class RealDevice:
         if self._location_sim is None:
             raise DeviceError("Not connected to an iPhone")
         try:
-            await self._location_sim.set(lat, lon)
+            await asyncio.wait_for(self._location_sim.set(lat, lon), COMMAND_TIMEOUT_S)
         except Exception as exc:
             raise DeviceError(_friendly(exc)) from exc
 
@@ -200,7 +232,7 @@ class RealDevice:
         if self._location_sim is None:
             raise DeviceError("Not connected to an iPhone")
         try:
-            await self._location_sim.clear()
+            await asyncio.wait_for(self._location_sim.clear(), COMMAND_TIMEOUT_S)
         except Exception as exc:
             raise DeviceError(_friendly(exc)) from exc
 

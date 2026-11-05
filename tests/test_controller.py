@@ -183,3 +183,56 @@ async def test_route_from_track_start_jumps_there_first(tmp_path):
     sets = [c[1:] for c in dev.calls if c[0] == "set"]
     assert sets[1] == TIMES_SQUARE  # jumped to the track start, not walked from London
     assert dev.location == EMPIRE_STATE
+
+
+async def test_keepalive_resends_held_position(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    ctl.keepalive_interval = 0.02
+    await ctl.connect()
+    await ctl.teleport(*TIMES_SQUARE)
+    task = ctl.start_keepalive()
+    await asyncio.sleep(0.15)
+    task.cancel()
+    sets = [c for c in dev.calls if c[0] == "set"]
+    assert len(sets) >= 3  # teleport + several keepalive re-sends
+    assert all(c[1:] == TIMES_SQUARE for c in sets)
+
+
+async def test_keepalive_reconnects_after_drop_and_restores_location(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    ctl.keepalive_interval = 0.02
+    await ctl.connect()
+    await ctl.teleport(*TIMES_SQUARE)
+    task = ctl.start_keepalive()
+
+    # Phone drops off Wi-Fi and can't be reached for a while.
+    dev.connected = False
+    dev.location = None
+    dev.fail_connect = "No iPhone found."
+    await asyncio.sleep(0.1)
+    assert ctl.connection == "error"
+    assert "retrying" in ctl.error.lower()
+
+    # Phone comes back: keepalive reconnects and puts the fake location back.
+    dev.fail_connect = None
+    await asyncio.sleep(0.1)
+    task.cancel()
+    assert ctl.connection == "connected"
+    assert ctl.error is None
+    assert dev.location == TIMES_SQUARE
+
+
+async def test_keepalive_idle_does_nothing(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    ctl.keepalive_interval = 0.02
+    await ctl.connect()
+    task = ctl.start_keepalive()
+    await asyncio.sleep(0.1)
+    task.cancel()
+    assert not [c for c in dev.calls if c[0] == "set"]
+
+
+async def test_status_includes_transport(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    await ctl.connect()
+    assert ctl.status()["device"]["transport"] == "pretend"

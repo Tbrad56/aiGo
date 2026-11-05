@@ -53,6 +53,7 @@ def create_app(controller: Controller, *, connect_on_start: bool = True) -> Fast
                     await controller.connect()
 
             task = asyncio.create_task(_connect())
+        controller.start_keepalive()
         yield
         if task:
             task.cancel()

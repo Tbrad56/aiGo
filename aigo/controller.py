@@ -38,6 +38,10 @@ class Controller:
         self._clock = clock
         self.fake = fake
         self.rng = random.Random()
+        # While holding a position, re-send it this often. This notices a dropped link (e.g. Wi-Fi
+        # when the phone sleeps), reconnects, and puts the simulated location back.
+        self.keepalive_interval = 5.0
+        self._keepalive_task: Optional[asyncio.Task] = None
 
         self.connection = "disconnected"  # disconnected | connecting | connected | error
         self.error: Optional[str] = None
@@ -57,7 +61,13 @@ class Controller:
             "connection": self.connection,
             "error": self.error,
             "fake": self.fake,
-            "device": {"name": info.name, "ios": info.ios, "model": info.model, "udid": info.udid},
+            "device": {
+                "name": info.name,
+                "ios": info.ios,
+                "model": info.model,
+                "udid": info.udid,
+                "transport": info.transport,
+            },
             "position": {"lat": self.position[0], "lon": self.position[1]} if self.position else None,
             "mode": self.mode,
             "route": self.route_progress,
@@ -247,12 +257,41 @@ class Controller:
             self.route_progress = None
             self._notify()
 
+    # ----- keepalive -----
+    def start_keepalive(self) -> asyncio.Task:
+        if self._keepalive_task is None or self._keepalive_task.done():
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+        return self._keepalive_task
+
+    async def _keepalive_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.keepalive_interval)
+            if self.position is None or self.mode != "holding":
+                continue  # nothing held, or a route is already sending positions
+            recent = self._last_set_at is not None and (
+                self._clock() - self._last_set_at < self.keepalive_interval * 0.8
+            )
+            if self.connection == "connected" and recent:
+                continue
+            try:
+                await self._set(self.position)
+                self._notify()
+            except DeviceError as exc:
+                self.connection = "error"
+                self.error = f"Lost the iPhone: {exc} aiGo keeps retrying every {self.keepalive_interval:g} s."
+                log.warning("keepalive: %s", exc)
+                self._notify()
+
     async def wait_route(self) -> None:
         if self._route_task:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._route_task
 
     async def shutdown(self) -> None:
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._keepalive_task
         await self.stop_route()
         with contextlib.suppress(Exception):
             async with self._lock:

@@ -569,7 +569,7 @@ function renderStatus(s) {
   pill.dataset.state = s.connection;
   const dev = s.device || {};
   const label = {
-    connected: `${dev.name || "iPhone"}${dev.ios ? ` · iOS ${dev.ios}` : ""}`,
+    connected: `${dev.name || "iPhone"}${dev.ios ? ` · iOS ${dev.ios}` : ""}${dev.transport && dev.transport !== "pretend" ? ` · ${dev.transport}` : ""}`,
     connecting: "Connecting to iPhone…",
     error: "Not connected",
     disconnected: "Not connected",
