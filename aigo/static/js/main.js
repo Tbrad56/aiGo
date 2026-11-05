@@ -60,28 +60,35 @@ bus.on("set-speed", (kmh) => setSpeed(kmh));
 
 // ---------- status band ----------
 let placeTimer = null;
-let placeFor = "";
+let placeDue = 0;        // when the scheduled lookup fires
 let lastPlaceLookup = 0;
 
 function wantPlace(pos, inTrip) {
-  // Joystick and routes move constantly: look the name up once things settle (or every 30 s on a trip).
-  const key = `${pos.lat.toFixed(4)},${pos.lon.toFixed(4)}`;
   const cached = cachedPlace(pos.lat, pos.lon);
-  if (cached) { placeFor = key; return cached; }
-  if (key === placeFor) return null;
+  if (cached) return cached;
+  // On a trip, refresh at most every 30 s, but soon if there's no name to show at all.
+  const delay = inTrip && shownPlace ? Math.max(0, 30000 - (Date.now() - lastPlaceLookup)) : 1200;
+  // Status updates arrive every second while moving: never push a scheduled lookup back (it would
+  // never fire). Only bring it forward when this request needs a name sooner.
+  if (placeTimer && Date.now() + delay >= placeDue) return null;
   clearTimeout(placeTimer);
-  const delay = inTrip ? Math.max(0, 30000 - (Date.now() - lastPlaceLookup)) : 1200;
+  placeDue = Date.now() + delay;
   placeTimer = setTimeout(async () => {
+    placeTimer = null;
+    const s = state.status;
+    if (!s || !s.position) return;
+    const { lat, lon } = s.position; // where the phone is now, not when this was scheduled
     lastPlaceLookup = Date.now();
-    placeFor = key;
-    await placeName(pos.lat, pos.lon);
+    const found = await placeName(lat, lon);
+    if (found) shownPlace = { ...found, lat, lon };
     if (state.status) renderBand(state.status);
   }, delay);
   return null;
 }
 
 let shownPlace = null; // {title, detail, lat, lon}: the name only stays while the phone is near it
-const NAME_RADIUS_M = 150;
+const NAME_RADIUS_M = 150;       // a held spot: a new name once the phone moves a block
+const TRIP_NAME_RADIUS_M = 400;  // on a trip: ~30 s of driving between name refreshes
 function renderBand(s) {
   const band = $("#band");
   const r = s.route;
@@ -103,7 +110,8 @@ function renderBand(s) {
   } else {
     const place = wantPlace(s.position, st === "trip");
     if (place) shownPlace = { ...place, lat: s.position.lat, lon: s.position.lon };
-    else if (shownPlace && haversine([shownPlace.lat, shownPlace.lon], [s.position.lat, s.position.lon]) > NAME_RADIUS_M) {
+    else if (shownPlace && haversine([shownPlace.lat, shownPlace.lon], [s.position.lat, s.position.lon])
+             > (st === "trip" ? TRIP_NAME_RADIUS_M : NAME_RADIUS_M)) {
       shownPlace = null; // moved away: don't show the old name with new coordinates
     }
     const title = shownPlace ? shownPlace.title : fmtCoord(s.position.lat, s.position.lon);
