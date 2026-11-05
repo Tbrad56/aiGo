@@ -10,98 +10,163 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div id="map"></div>
+  <div id="map" aria-label="Map. Right-click a spot for options."></div>
 
-  <aside id="panel">
-    <header class="panel-head">
-      <div class="brand">ai<span>Go</span></div>
-      <div id="conn" class="pill" data-state="disconnected">
-        <span class="dot"></span><span id="conn-text">Starting…</span>
+  <aside id="panel" aria-label="aiGo controls">
+    <header class="topbar">
+      <div class="brand">aiGo</div>
+      <div id="conn" class="conn" data-state="disconnected" role="status">
+        <span class="dot" aria-hidden="true"></span><span id="conn-text">Starting…</span>
       </div>
+      <button id="btn-collapse" class="icon-btn" aria-expanded="true" aria-controls="panel-body" title="Hide panel">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </header>
-    <div id="conn-error" class="error-box" hidden>
+
+    <div id="conn-error" class="conn-error" hidden>
       <p id="conn-error-text"></p>
       <button id="btn-reconnect" class="btn small">Try again</button>
     </div>
 
-    <section class="block">
-      <div class="now">
-        <div>
-          <div class="label">Phone is reporting</div>
-          <div id="now-pos" class="now-pos">Real location</div>
-        </div>
-        <button id="btn-clear" class="btn danger" title="Stop spoofing and return to your real GPS">Stop spoofing</button>
-      </div>
-    </section>
+    <!-- The one bold element: where the phone thinks it is. -->
+    <section id="band" class="band" data-state="real" aria-live="polite">
+      <div class="band-tag" id="band-tag">Real GPS</div>
+      <h1 class="band-title" id="band-title">Your real location</h1>
+      <p class="band-detail" id="band-detail">Your phone reports where it really is.</p>
 
-    <section class="block">
-      <form id="search-form" class="row">
-        <input id="search" type="search" placeholder="Search a place or paste lat, lon" autocomplete="off">
-        <button class="btn" type="submit">Find</button>
-      </form>
-      <ul id="search-results" class="list" hidden></ul>
-    </section>
-
-    <nav class="tabs" role="tablist">
-      <button class="tab active" data-tab="teleport" role="tab">Teleport</button>
-      <button class="tab" data-tab="route" role="tab">Route</button>
-      <button class="tab" data-tab="joystick" role="tab">Joystick</button>
-    </nav>
-
-    <section class="block tab-body" data-body="teleport">
-      <p class="hint">Click anywhere on the map, then choose <b>Teleport here</b>.</p>
-      <div class="sub-head">
-        <h3>Favorites</h3>
-        <button id="btn-save-fav" class="btn small ghost">Save current</button>
-      </div>
-      <ul id="favorites" class="list"><li class="empty">No favorites yet.</li></ul>
-      <h3>Recent</h3>
-      <ul id="history" class="list"><li class="empty">Nothing yet.</li></ul>
-    </section>
-
-    <section class="block tab-body" data-body="route" hidden>
-      <p class="hint">Click the map to add stops. Click a numbered pin to remove it. The phone travels there from where it is now.</p>
-      <div class="route-stats">
-        <span id="route-count">0 stops</span><span id="route-dist">0 km</span><span id="route-eta">—</span>
-      </div>
-      <p id="route-note" class="note" hidden></p>
-      <div class="speed-group" data-speed-group></div>
-      <label class="check"><input id="route-roads" type="checkbox"> Follow roads <span class="aside">(also used by Travel here)</span></label>
-      <label class="check"><input id="route-vary" type="checkbox"> Vary speed slightly</label>
-      <label class="check"><input id="route-loop" type="checkbox"> Loop back to the start</label>
-      <div class="row">
-        <button id="btn-route-start" class="btn primary grow">Start route</button>
-        <button id="btn-route-undo" class="btn ghost">Undo</button>
-        <button id="btn-route-reset" class="btn ghost">Reset</button>
-      </div>
-      <div class="row">
-        <label class="btn ghost file-btn grow">Import GPX file<input id="gpx-file" type="file" accept=".gpx,application/gpx+xml"></label>
-      </div>
-      <div id="route-progress" class="progress" hidden>
-        <div class="bar"><div id="route-bar"></div></div>
-        <div class="row between">
-          <span id="route-progress-text"></span>
-          <button id="btn-route-stop" class="btn small">Stop</button>
+      <div class="band-trip" id="band-trip" hidden>
+        <div class="trip-bar"><div id="trip-bar"></div></div>
+        <p class="trip-line" id="trip-line"></p>
+        <div class="trip-controls">
+          <button id="btn-pause" class="btn band-btn" title="Pause (Space)">Pause</button>
+          <div class="trip-speeds" id="trip-speeds" role="group" aria-label="Change speed"></div>
+          <button id="btn-trip-stop" class="btn band-btn" title="Stop route (Esc)">Stop</button>
         </div>
       </div>
-    </section>
 
-    <section class="block tab-body" data-body="joystick" hidden>
-      <p class="hint">Hold arrow keys or W A S D, or press and hold the pad.</p>
-      <div class="speed-group" data-speed-group></div>
-      <div class="pad">
-        <button data-dir="0" class="up" aria-label="North">▲</button>
-        <button data-dir="270" class="left" aria-label="West">◀</button>
-        <button data-dir="90" class="right" aria-label="East">▶</button>
-        <button data-dir="180" class="down" aria-label="South">▼</button>
+      <div class="band-foot" id="band-foot" hidden>
+        <span class="coords" id="band-coords"></span>
+        <button id="btn-clear" class="btn band-btn" title="Return your phone to its real GPS">Stop spoofing</button>
       </div>
     </section>
+
+    <div id="panel-body" class="panel-body">
+      <div class="search">
+        <input id="search" type="search" placeholder="Search a place, or paste lat, lon" autocomplete="off"
+               role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list"
+               title="Search (/)">
+        <ul id="search-results" class="suggest" role="listbox" hidden></ul>
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="teleport">Places</button>
+        <button class="tab" role="tab" data-tab="route">Route</button>
+        <button class="tab" role="tab" data-tab="joystick">Joystick</button>
+        <button class="tab" role="tab" data-tab="schedule">Schedule</button>
+      </nav>
+
+      <!-- Places -->
+      <section class="tab-body" data-body="teleport" role="tabpanel">
+        <p class="hint">Click the map to teleport, or right-click for more.</p>
+        <h2>Home</h2>
+        <div id="home-card" class="home-card"></div>
+        <label class="check"><input id="home-start" type="checkbox"> Start trips from Home</label>
+        <div class="sub-head">
+          <h2>Favorites</h2>
+          <button id="btn-save-fav" class="btn small ghost">Save current spot</button>
+        </div>
+        <ul id="favorites" class="list"></ul>
+        <h2>Recent</h2>
+        <ul id="history" class="list"></ul>
+      </section>
+
+      <!-- Route -->
+      <section class="tab-body" data-body="route" role="tabpanel" hidden>
+        <p class="hint">Click the map to add stops. Set a wait to linger at a stop, like an errand.</p>
+        <ol id="stops" class="stops"></ol>
+        <div class="route-sum">
+          <span id="route-dist">0 km</span>
+          <span id="route-eta">No stops yet</span>
+        </div>
+        <p id="route-note" class="note" hidden></p>
+        <div class="speed-group" data-speed-group role="group" aria-label="Speed"></div>
+        <label class="check"><input id="route-roads" type="checkbox"> Follow roads</label>
+        <label class="check"><input id="route-vary" type="checkbox"> Vary speed slightly</label>
+        <label class="check"><input id="route-loop" type="checkbox"> Loop back to the start</label>
+        <div class="row">
+          <button id="btn-route-start" class="btn primary grow">Start route</button>
+          <button id="btn-route-save" class="btn">Save</button>
+          <button id="btn-route-reset" class="btn ghost">Clear</button>
+        </div>
+        <label class="btn ghost file-btn">Import GPX file<input id="gpx-file" type="file" accept=".gpx,application/gpx+xml"></label>
+        <h2>Saved routes</h2>
+        <ul id="saved-routes" class="list"></ul>
+      </section>
+
+      <!-- Joystick -->
+      <section class="tab-body" data-body="joystick" role="tabpanel" hidden>
+        <p class="hint">Hold the arrow keys or W A S D, or press and hold the pad.</p>
+        <div class="speed-group" data-speed-group role="group" aria-label="Speed"></div>
+        <div class="pad">
+          <button data-dir="0" class="up" aria-label="North">▲</button>
+          <button data-dir="270" class="left" aria-label="West">◀</button>
+          <button data-dir="90" class="right" aria-label="East">▶</button>
+          <button data-dir="180" class="down" aria-label="South">▼</button>
+        </div>
+      </section>
+
+      <!-- Schedule -->
+      <section class="tab-body" data-body="schedule" role="tabpanel" hidden>
+        <p class="hint">aiGo moves your phone at these times while it's running.</p>
+        <ul id="schedules" class="sched-list"></ul>
+        <details id="sched-form-wrap" class="sched-form-wrap">
+          <summary class="btn">Add a schedule</summary>
+          <form id="sched-form" class="sched-form">
+            <label>Name <input id="sf-name" type="text" maxlength="100" placeholder="Work day"></label>
+            <label>Time <input id="sf-time" type="time" required value="09:00"></label>
+            <fieldset class="days">
+              <legend>Days</legend>
+              <div id="sf-days" class="day-chips"></div>
+            </fieldset>
+            <label>Do
+              <select id="sf-action">
+                <option value="travel">Travel to a favorite</option>
+                <option value="teleport">Teleport to a favorite</option>
+                <option value="route">Play a saved route</option>
+                <option value="stop">Stop spoofing</option>
+              </select>
+            </label>
+            <label id="sf-target-wrap">Where <select id="sf-target"></select></label>
+            <label id="sf-speed-wrap">How
+              <select id="sf-speed">
+                <option value="5">Walk</option>
+                <option value="10">Run</option>
+                <option value="18">Bike</option>
+                <option value="50" selected>Drive</option>
+              </select>
+            </label>
+            <div class="row">
+              <button class="btn primary grow" type="submit">Add schedule</button>
+            </div>
+          </form>
+        </details>
+      </section>
+
+      <footer class="keys">
+        <span><kbd>/</kbd> search</span><span><kbd>Space</kbd> pause</span><span><kbd>Esc</kbd> stop route</span>
+      </footer>
+    </div>
   </aside>
 
+  <button id="btn-expand" class="mini" hidden aria-controls="panel" title="Show panel">
+    <span class="dot" aria-hidden="true"></span><span id="mini-text">aiGo</span>
+  </button>
+
+  <div id="ctx" class="ctx" role="menu" hidden></div>
   <div id="toast" role="status" hidden></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

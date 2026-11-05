@@ -236,3 +236,105 @@ async def test_status_includes_transport(tmp_path):
     ctl, dev, _ = make(tmp_path)
     await ctl.connect()
     assert ctl.status()["device"]["transport"] == "pretend"
+
+
+def test_split_legs():
+    from aigo.controller import _split_legs
+
+    pts = [(0.0, float(i)) for i in range(5)]
+    legs = _split_legs(pts, {2: 60, 0: 99, 9: 5})  # start and out-of-range indices are ignored
+    assert legs == [(pts[0:3], 60.0), (pts[2:5], 0.0)]
+    assert _split_legs(pts, {4: 30}) == [(pts, 30.0)]
+    assert _split_legs(pts, {}) == [(pts, 0.0)]
+
+
+async def test_route_waits_at_stop(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    await ctl.connect()
+    await ctl.teleport(*TIMES_SQUARE)
+    seen_waiting = []
+    q = ctl.subscribe()
+
+    async def watch():
+        while True:
+            r = (await q.get())["route"]
+            if r and r["waiting_s"] > 0:
+                seen_waiting.append((r["waiting_s"], r["leg"]))
+
+    watcher = asyncio.create_task(watch())
+    # index 0 = EMPIRE_STATE in the given points; wait 3 s there, then continue
+    far = destination(EMPIRE_STATE, 180, 50)
+    info = await ctl.start_route([EMPIRE_STATE, far], speed_kmh=360, dwell={0: 3})
+    assert info["stops"] == 2
+    assert info["eta_s"] == pytest.approx(info["total_m"] / 100 + 3)
+    await ctl.wait_route()
+    await asyncio.sleep(0)
+    watcher.cancel()
+    assert dev.location == far
+    assert seen_waiting and seen_waiting[0] == (3, 1)
+    assert min(w for w, _ in seen_waiting) == 1  # counted down 3, 2, 1
+
+
+async def test_pause_and_resume_route(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    await ctl.connect()
+    await ctl.teleport(*TIMES_SQUARE)
+    await ctl.start_route([destination(TIMES_SQUARE, 0, 100_000)], speed_kmh=36)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    await ctl.pause_route()
+    assert ctl.status()["route"]["paused"] is True
+    for _ in range(3):
+        await asyncio.sleep(0)
+    frozen = dev.location
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert dev.location == frozen  # no movement while paused
+    await ctl.resume_route()
+    assert ctl.status()["route"]["paused"] is False
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert dev.location != frozen
+    await ctl.stop_route()
+
+
+async def test_change_speed_mid_route(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    await ctl.connect()
+    await ctl.teleport(*TIMES_SQUARE)
+    await ctl.start_route([destination(TIMES_SQUARE, 90, 100_000)], speed_kmh=36)  # 10 m/tick
+    for _ in range(10):
+        await asyncio.sleep(0)
+    await ctl.set_route_speed(72)  # 20 m/tick
+    assert ctl.status()["route"]["speed_kmh"] == pytest.approx(72)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    sets = [c[1:] for c in dev.calls if c[0] == "set"]
+    last_step = distance_m(sets[-2], sets[-1])
+    assert last_step == pytest.approx(20, rel=0.01)
+    await ctl.stop_route()
+
+
+async def test_route_controls_need_a_route(tmp_path):
+    ctl, _, _ = make(tmp_path)
+    await ctl.connect()
+    with pytest.raises(ValueError):
+        await ctl.pause_route()
+    with pytest.raises(ValueError):
+        await ctl.set_route_speed(10)
+
+
+async def test_keepalive_covers_paused_route(tmp_path):
+    ctl, dev, _ = make(tmp_path)
+    ctl.keepalive_interval = 0.02
+    await ctl.connect()
+    await ctl.teleport(*TIMES_SQUARE)
+    await ctl.start_route([destination(TIMES_SQUARE, 0, 100_000)], speed_kmh=5)
+    await asyncio.sleep(0)
+    await ctl.pause_route()
+    n = len([c for c in dev.calls if c[0] == "set"])
+    task = ctl.start_keepalive()
+    await asyncio.sleep(0.12)
+    task.cancel()
+    assert len([c for c in dev.calls if c[0] == "set"]) > n  # held position re-sent while paused
+    await ctl.stop_route()

@@ -17,6 +17,8 @@ from aigo.device import FakeDevice, RealDevice
 from aigo.server import create_app
 from aigo.store import Store
 
+log = logging.getLogger("aigo")
+
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="aigo", description="Set your iPhone's location from a map.")
@@ -33,7 +35,52 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--no-browser", action="store_true", help="don't open the browser automatically")
     p.add_argument("-v", "--verbose", action="store_true", help="show debug logs")
     p.add_argument("--self-check", action="store_true", help="check that every phone component loads, then exit")
-    return p.parse_args(argv)
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--tray", dest="tray", action="store_true", default=None, help="run from a system tray icon")
+    mode.add_argument("--console", dest="tray", action="store_false", help="run in this console window")
+    args = p.parse_args(argv)
+    if args.tray is None:  # default: tray for the packaged Windows app, console otherwise
+        args.tray = bool(getattr(sys, "frozen", False)) and sys.platform == "win32"
+    return args
+
+
+LOG_MAX_BYTES = 2_000_000
+
+
+def log_path():
+    return Store().path.parent / "aigo.log"
+
+
+def ensure_output() -> None:
+    """A windowed exe has no console (sys.stdout is None): send all output to a log file instead."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    if sys.platform == "win32":
+        import ctypes
+
+        # Started from a terminal (e.g. `aiGo.exe --self-check`): print there.
+        if ctypes.windll.kernel32.AttachConsole(-1):  # ATTACH_PARENT_PROCESS
+            out = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+            sys.stdout = sys.stdout or out
+            sys.stderr = sys.stderr or out
+            return
+    path = log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > LOG_MAX_BYTES:
+        path.unlink()
+    f = open(path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stdout or f
+    sys.stderr = sys.stderr or f
+
+
+def show_error(text: str) -> None:
+    """Report a startup failure where the user can see it."""
+    if getattr(sys, "frozen", False) and sys.platform == "win32" and not sys.stdin:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, text, "aiGo couldn't start", 0x10)
+    elif getattr(sys, "frozen", False):
+        input("\naiGo hit an error (details above). Press Enter to close this window...")
 
 
 def self_check() -> bool:
@@ -64,15 +111,15 @@ def already_running(port: int) -> bool:
 
 
 def main(argv=None) -> None:
+    ensure_output()
     try:
         run(argv)
-    except Exception:
-        if getattr(sys, "frozen", False):
-            # Double-clicked exe: keep the window open so the error can be read.
-            import traceback
+    except Exception as exc:
+        import traceback
 
-            traceback.print_exc()
-            input("\naiGo hit an error (details above). Press Enter to close this window...")
+        traceback.print_exc()
+        if getattr(sys, "frozen", False):
+            show_error(f"{type(exc).__name__}: {exc}\n\nDetails are in {log_path()}")
         raise
 
 
@@ -103,12 +150,19 @@ def run(argv=None) -> None:
     controller = Controller(device, Store(), fake=args.fake)
     app = create_app(controller)
 
+    # The graceful-shutdown timeout guarantees quitting reaches the cleanup that clears the location.
+    config = uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level="warning", timeout_graceful_shutdown=3)
+    if args.tray:
+        from aigo.tray import run_tray
+
+        log.info("aiGo running at %s (tray mode)", url)
+        run_tray(uvicorn.Server(config), url, open_browser=not args.no_browser)
+        return
+
     print(f"\n  aiGo is running at {url}\n  Press Ctrl+C to stop (your phone returns to its real location).\n")
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-
-    # The graceful-shutdown timeout guarantees Ctrl+C reaches the cleanup that clears the location.
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning", timeout_graceful_shutdown=3)
+    uvicorn.Server(config).run()
 
 
 if __name__ == "__main__":

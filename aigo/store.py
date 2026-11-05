@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 HISTORY_LIMIT = 50
+COLLECTIONS = ("favorites", "history", "routes", "schedules")
 
 
 def default_path() -> Path:
@@ -23,7 +24,8 @@ def default_path() -> Path:
 class Store:
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else default_path()
-        self.data: dict[str, list[dict[str, Any]]] = {"favorites": [], "history": []}
+        self.data: dict[str, list[dict[str, Any]]] = {k: [] for k in COLLECTIONS}
+        self.settings: dict[str, Any] = {}
         self._load()
 
     def _load(self) -> None:
@@ -32,14 +34,16 @@ class Store:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return
         if isinstance(loaded, dict):
-            for key in ("favorites", "history"):
+            for key in COLLECTIONS:
                 if isinstance(loaded.get(key), list):
                     self.data[key] = loaded[key]
+            if isinstance(loaded.get("settings"), dict):
+                self.settings = loaded["settings"]
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps({**self.data, "settings": self.settings}, indent=2), encoding="utf-8")
         tmp.replace(self.path)
 
     # favorites
@@ -70,4 +74,44 @@ class Store:
             return
         hist.insert(0, {"lat": lat, "lon": lon, "at": int(time.time())})
         del hist[HISTORY_LIMIT:]
+        self._save()
+
+    # saved routes and schedules: lists of dicts with an "id"
+    def items(self, kind: str) -> list[dict[str, Any]]:
+        return [dict(x) for x in self.data[kind]]
+
+    def get(self, kind: str, item_id: str) -> Optional[dict[str, Any]]:
+        return next((dict(x) for x in self.data[kind] if x.get("id") == item_id), None)
+
+    def add(self, kind: str, item: dict[str, Any]) -> dict[str, Any]:
+        item = {**item, "id": uuid.uuid4().hex[:12]}
+        self.data[kind].append(item)
+        self._save()
+        return dict(item)
+
+    def update(self, kind: str, item_id: str, item: dict[str, Any]) -> Optional[dict[str, Any]]:
+        for i, x in enumerate(self.data[kind]):
+            if x.get("id") == item_id:
+                self.data[kind][i] = {**item, "id": item_id}
+                self._save()
+                return dict(self.data[kind][i])
+        return None
+
+    def remove(self, kind: str, item_id: str) -> bool:
+        before = len(self.data[kind])
+        self.data[kind] = [x for x in self.data[kind] if x.get("id") != item_id]
+        changed = len(self.data[kind]) != before
+        if changed:
+            self._save()
+        return changed
+
+    # settings (home, start trips from home)
+    def setting(self, key: str, default: Any = None) -> Any:
+        return self.settings.get(key, default)
+
+    def set_setting(self, key: str, value: Any) -> None:
+        if value is None:
+            self.settings.pop(key, None)
+        else:
+            self.settings[key] = value
         self._save()

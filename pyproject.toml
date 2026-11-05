@@ -11,6 +11,7 @@ dependencies = [
     "pymobiledevice3>=11.50",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    "pystray>=0.19; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +24,7 @@ aigo = "aigo.__main__:main"
 include = ["aigo*"]
 
 [tool.setuptools.package-data]
-aigo = ["static/*"]
+aigo = ["static/*", "static/js/*", "static/fonts/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

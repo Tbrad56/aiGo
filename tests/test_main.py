@@ -44,3 +44,9 @@ def test_self_check_passes_in_dev_env(capsys):
 
     assert self_check() is True
     assert "Self-check passed." in capsys.readouterr().out
+
+
+def test_tray_flags():
+    assert parse_args(["--tray"]).tray is True
+    assert parse_args(["--console"]).tray is False
+    assert parse_args([]).tray is False  # not frozen: console by default

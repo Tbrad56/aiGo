@@ -7,6 +7,7 @@ import contextlib
 import logging
 import random
 import time
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from aigo.device import DeviceError, LocationDevice
@@ -48,10 +49,12 @@ class Controller:
         self.position: Optional[LatLon] = None
         self.mode = "idle"  # idle | holding | route
         self.route_progress: Optional[dict[str, Any]] = None
+        self.last_event: Optional[dict[str, Any]] = None  # e.g. a schedule that just ran
 
         self._last_set_at: Optional[float] = None
         self._lock = asyncio.Lock()
         self._route_task: Optional[asyncio.Task] = None
+        self._route: Optional[_RouteState] = None
         self._listeners: set[asyncio.Queue] = set()
 
     # ----- status / subscriptions -----
@@ -71,7 +74,14 @@ class Controller:
             "position": {"lat": self.position[0], "lon": self.position[1]} if self.position else None,
             "mode": self.mode,
             "route": self.route_progress,
+            "event": self.last_event,
         }
+
+    def announce(self, text: str, ok: bool = True) -> None:
+        """Tell every open page about something that happened on its own (shown as a toast)."""
+        n = (self.last_event or {}).get("id", 0) + 1
+        self.last_event = {"id": n, "text": text, "ok": ok}
+        self._notify()
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=16)
@@ -174,64 +184,72 @@ class Controller:
         loop: bool = False,
         variation: float = 0.0,
         from_current: bool = True,
+        dwell: Optional[dict[int, float]] = None,
     ) -> dict[str, Any]:
         """Travel along `points` at `speed_kmh`.
 
         `variation` (0-0.5) randomly varies each step's length by up to that fraction, so the pace
         isn't perfectly even. With `from_current=False` (e.g. a GPX track) the phone jumps to the
-        first point instead of travelling there from where it is."""
+        first point instead of travelling there from where it is. `dwell` maps an index in `points`
+        to seconds to wait there (a stop on an errand)."""
         if speed_kmh <= 0:
             raise ValueError("Speed must be above 0.")
         if not 0 <= variation <= 0.5:
             raise ValueError("Speed variation must be between 0 and 0.5.")
+        dwell = dict(dwell or {})
+        if any(v < 0 for v in dwell.values()):
+            raise ValueError("Wait times can't be negative.")
         if from_current and self.position is not None:
             points = [self.position, *points]
+            dwell = {i + 1: v for i, v in dwell.items()}
         if len(points) < 2:
             raise ValueError("A route needs at least two points.")
         if loop and points[0] != points[-1]:
             points = [*points, points[0]]
         await self.stop_route()
-        speed_mps = speed_kmh / 3.6
-        length = path_length_m(points)
+
+        legs = _split_legs(points, dwell)
+        route = _RouteState(
+            speed_mps=speed_kmh / 3.6,
+            variation=variation,
+            loop=loop,
+            legs=legs,
+            total_m=sum(path_length_m(pts) for pts, _ in legs),
+            total_wait_s=sum(w for _, w in legs),
+        )
+        self._route = route
         self.mode = "route"
-        self.route_progress = {
-            "done_m": 0.0,
-            "total_m": length,
-            "speed_kmh": speed_kmh,
-            "loop": loop,
-            "eta_s": length / speed_mps,
-        }
-        self._route_task = asyncio.create_task(self._run_route(points, speed_mps, loop, variation))
-        self._notify()
-        return {"total_m": length, "eta_s": length / speed_mps}
+        self._route_task = asyncio.create_task(self._run_route(route))
+        self._publish_route()
+        return {"total_m": route.total_m, "eta_s": route.eta_s(), "stops": len(legs)}
 
-    async def _run_route(self, points: list[LatLon], speed_mps: float, loop: bool, variation: float) -> None:
-        base_m = speed_mps * self.interval
-
+    async def _run_route(self, route: "_RouteState") -> None:
         def next_step() -> float:
-            return base_m * (1 + self.rng.uniform(-variation, variation)) if variation else base_m
+            base = route.speed_mps * self.interval
+            v = route.variation
+            return base * (1 + self.rng.uniform(-v, v)) if v else base
 
         try:
-            if self.position is None or distance_m(self.position, points[0]) > 1:
-                await self._set(points[0])
+            first = route.legs[0][0][0]
+            if self.position is None or distance_m(self.position, first) > 1:
+                await self._set(first)
             while True:
-                total = path_length_m(points)
-                done = 0.0
-                prev = points[0]
-                for pos in walk_path(points, next_step):
-                    await self._sleep(self.interval)
-                    await self._set(pos)
-                    done += distance_m(prev, pos)
-                    prev = pos
-                    self.route_progress = {
-                        **(self.route_progress or {}),
-                        "done_m": done,
-                        "total_m": total,
-                        "eta_s": max(total - done, 0) / speed_mps,
-                    }
-                    self._notify()
-                if not loop:
+                route.start_lap()
+                for leg_index, (pts, wait_s) in enumerate(route.legs):
+                    route.leg = leg_index
+                    prev = pts[0]
+                    for pos in walk_path(pts, next_step):
+                        await self._sleep(self.interval)
+                        await route.resumed.wait()
+                        await self._set(pos)
+                        route.done_m += distance_m(prev, pos)
+                        prev = pos
+                        self._publish_route()
+                    if wait_s > 0:
+                        await self._wait_at_stop(route, wait_s)
+                if not route.loop:
                     break
+                route.lap += 1
             if self.store and self.position:
                 self.store.add_history(*self.position)
         except asyncio.CancelledError:
@@ -242,9 +260,50 @@ class Controller:
         finally:
             if self._route_task is asyncio.current_task():
                 self._route_task = None
+                self._route = None
                 self.mode = "holding" if self.position else "idle"
                 self.route_progress = None
                 self._notify()
+
+    async def _wait_at_stop(self, route: "_RouteState", wait_s: float) -> None:
+        route.waiting_s = wait_s
+        self._publish_route()
+        while route.waiting_s > 0:
+            tick = min(self.interval, route.waiting_s)
+            await self._sleep(tick)
+            await route.resumed.wait()  # a paused wait doesn't count down
+            route.waiting_s = max(0.0, route.waiting_s - tick)
+            route.waited_s += tick
+            self._publish_route()
+        route.waiting_s = 0.0
+
+    def _publish_route(self) -> None:
+        """Refresh the route's progress and push it to every open page."""
+        if self._route is not None:
+            self.route_progress = self._route.progress()
+        self._notify()
+
+    def _require_route(self) -> "_RouteState":
+        if self._route is None or self.mode != "route":
+            raise ValueError("No route is running.")
+        return self._route
+
+    async def pause_route(self) -> None:
+        route = self._require_route()
+        route.resumed.clear()
+        self._publish_route()
+
+    async def resume_route(self) -> None:
+        route = self._require_route()
+        route.resumed.set()
+        self._publish_route()
+
+    async def set_route_speed(self, speed_kmh: float) -> None:
+        if speed_kmh <= 0:
+            raise ValueError("Speed must be above 0.")
+        route = self._require_route()
+        route.speed_mps = speed_kmh / 3.6  # takes effect on the next step
+        self._publish_route()
 
     async def stop_route(self) -> None:
         task, self._route_task = self._route_task, None
@@ -252,6 +311,7 @@ class Controller:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        self._route = None
         if self.mode == "route":
             self.mode = "holding" if self.position else "idle"
             self.route_progress = None
@@ -266,8 +326,10 @@ class Controller:
     async def _keepalive_loop(self) -> None:
         while True:
             await asyncio.sleep(self.keepalive_interval)
-            if self.position is None or self.mode != "holding":
-                continue  # nothing held, or a route is already sending positions
+            if self.position is None or self.mode == "idle":
+                continue
+            # A moving route sends every second (so `recent` skips it); a paused route or a wait
+            # at a stop sends nothing, so it gets re-sent here like a held teleport.
             recent = self._last_set_at is not None and (
                 self._clock() - self._last_set_at < self.keepalive_interval * 0.8
             )
@@ -299,3 +361,63 @@ class Controller:
                     await self.device.clear_location()
         with contextlib.suppress(Exception):
             await self.device.close()
+
+
+def _split_legs(points: list[LatLon], dwell: dict[int, float]) -> list[tuple[list[LatLon], float]]:
+    """Cut a path into legs that end where the phone waits. Returns [(leg points, wait seconds)]."""
+    last = len(points) - 1
+    cuts = sorted(i for i, secs in dwell.items() if 0 < i <= last and secs > 0)
+    legs: list[tuple[list[LatLon], float]] = []
+    prev = 0
+    for c in cuts:
+        legs.append((points[prev : c + 1], float(dwell[c])))
+        prev = c
+    if prev < last:
+        legs.append((points[prev:], 0.0))
+    return legs
+
+
+def _new_event() -> asyncio.Event:
+    e = asyncio.Event()
+    e.set()
+    return e
+
+
+@dataclass
+class _RouteState:
+    speed_mps: float
+    variation: float
+    loop: bool
+    legs: list[tuple[list[LatLon], float]]
+    total_m: float
+    total_wait_s: float
+    done_m: float = 0.0
+    waited_s: float = 0.0
+    waiting_s: float = 0.0
+    leg: int = 0
+    lap: int = 0
+    resumed: asyncio.Event = field(default_factory=_new_event)  # cleared while paused
+
+    def start_lap(self) -> None:
+        self.done_m = 0.0
+        self.waited_s = 0.0
+        self.waiting_s = 0.0
+
+    def eta_s(self) -> float:
+        moving = max(self.total_m - self.done_m, 0.0) / self.speed_mps
+        waiting = max(self.total_wait_s - self.waited_s, 0.0)
+        return moving + waiting
+
+    def progress(self) -> dict[str, Any]:
+        return {
+            "done_m": self.done_m,
+            "total_m": self.total_m,
+            "speed_kmh": self.speed_mps * 3.6,
+            "loop": self.loop,
+            "eta_s": self.eta_s(),
+            "paused": not self.resumed.is_set(),
+            "waiting_s": self.waiting_s,
+            "leg": self.leg + 1,
+            "legs": len(self.legs),
+            "lap": self.lap + 1,
+        }

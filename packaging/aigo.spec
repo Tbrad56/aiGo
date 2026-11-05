@@ -9,7 +9,7 @@ ROOT = Path(SPECPATH).parent
 
 datas = [(str(ROOT / "aigo" / "static"), "aigo/static")]
 binaries = []
-hiddenimports = collect_submodules("aigo") + collect_submodules("uvicorn")
+hiddenimports = collect_submodules("aigo") + collect_submodules("uvicorn") + collect_submodules("pystray")
 
 # pymobiledevice3 imports much of itself lazily and ships data files; pytun_pmd3 carries the wintun
 # DLLs; pmd_pytcp is the no-admin userspace network stack; pykdebugparser ships a data table.
@@ -41,6 +41,6 @@ exe = EXE(
     exclude_binaries=True,
     name="aiGo",
     icon=str(ROOT / "packaging" / "aigo.ico"),
-    console=True,  # the window shows status; closing it quits aiGo
+    console=False,  # runs from a tray icon; output goes to %APPDATA%\aiGo\aigo.log
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="aiGo")

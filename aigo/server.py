@@ -11,10 +11,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Literal, Optional
+
 from pydantic import BaseModel, Field
 
 from aigo.controller import Controller
 from aigo.device import DeviceError
+from aigo.routing import FetchJson, RoutingError, plan_trip
+from aigo.security import LocalOnlyMiddleware
+from aigo.trips import Scheduler, play_saved_route, start_trip, stops_from, trip_origin
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
@@ -42,7 +47,64 @@ class FavoriteRequest(Point):
     name: str = Field(default="", max_length=100)
 
 
-def create_app(controller: Controller, *, connect_on_start: bool = True) -> FastAPI:
+class StopIn(Point):
+    wait_min: float = Field(default=0, ge=0, le=24 * 60)
+
+
+class TripRequest(BaseModel):
+    stops: list[StopIn] = Field(min_length=1, max_length=5000)
+    speed_kmh: float = Field(gt=0, le=1000)
+    follow_roads: bool = True
+    loop: bool = False
+    vary: bool = True
+
+
+class HomeRequest(Point):
+    name: str = Field(default="Home", max_length=100)
+
+
+class HomeSettings(BaseModel):
+    start_from_home: bool
+
+
+class SpeedRequest(BaseModel):
+    speed_kmh: float = Field(gt=0, le=1000)
+
+
+class SavedRoute(TripRequest):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class ScheduleIn(BaseModel):
+    name: str = Field(default="", max_length=100)
+    enabled: bool = True
+    time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    days: list[int] = Field(min_length=1, max_length=7)
+    action: Literal["teleport", "travel", "route", "stop"]
+    favorite_id: Optional[str] = None
+    route_id: Optional[str] = None
+    speed_kmh: Optional[float] = Field(default=None, gt=0, le=1000)
+
+
+def _check_schedule(s: ScheduleIn) -> dict:
+    if any(d < 0 or d > 6 for d in s.days):
+        raise HTTPException(422, "Days must be 0 (Monday) to 6 (Sunday).")
+    if s.action in ("teleport", "travel") and not s.favorite_id:
+        raise HTTPException(422, "Pick a favorite place for this schedule.")
+    if s.action == "route" and not s.route_id:
+        raise HTTPException(422, "Pick a saved route for this schedule.")
+    return {**s.model_dump(), "days": sorted(set(s.days))}
+
+
+def create_app(
+    controller: Controller,
+    *,
+    connect_on_start: bool = True,
+    fetch_json: Optional[FetchJson] = None,
+    scheduler: Optional[Scheduler] = None,
+) -> FastAPI:
+    scheduler = scheduler or Scheduler(controller, fetch_json=fetch_json)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         task = None
@@ -54,12 +116,15 @@ def create_app(controller: Controller, *, connect_on_start: bool = True) -> Fast
 
             task = asyncio.create_task(_connect())
         controller.start_keepalive()
+        scheduler.start()
         yield
         if task:
             task.cancel()
+        await scheduler.stop()
         await controller.shutdown()
 
     app = FastAPI(title="aiGo", lifespan=lifespan)
+    app.add_middleware(LocalOnlyMiddleware)
 
     async def run(coro):
         try:
@@ -68,6 +133,8 @@ def create_app(controller: Controller, *, connect_on_start: bool = True) -> Fast
             raise HTTPException(400, str(exc)) from exc
         except DeviceError as exc:
             raise HTTPException(503, str(exc)) from exc
+        except RoutingError as exc:
+            raise HTTPException(502, str(exc)) from exc
 
     @app.get("/api/status")
     async def status():
@@ -126,6 +193,125 @@ def create_app(controller: Controller, *, connect_on_start: bool = True) -> Fast
     @app.get("/api/history")
     async def history():
         return _store().history()
+
+    # ----- trips (stops planned on the server, optionally along roads) -----
+    @app.post("/api/directions")
+    async def directions(t: TripRequest):
+        """Preview what /api/trip would drive, without starting it."""
+        plan = await run(
+            plan_trip(trip_origin(controller), stops_from([x.model_dump() for x in t.stops]), t.speed_kmh,
+                      t.follow_roads, t.loop, fetch_json)
+        )
+        return {"points": plan["points"], "dwell": [[i, s] for i, s in plan["dwell"].items()], "note": plan["note"]}
+
+    @app.post("/api/trip")
+    async def trip(t: TripRequest):
+        result = await run(
+            start_trip(controller, stops_from([x.model_dump() for x in t.stops]), t.speed_kmh, t.follow_roads,
+                       t.loop, 0.15 if t.vary else 0.0, fetch_json)
+        )
+        return {**result, "status": controller.status()}
+
+    # ----- home -----
+    def _home_state() -> dict:
+        s = _store()
+        return {"home": s.setting("home"), "start_from_home": s.setting("start_from_home", True)}
+
+    @app.get("/api/home")
+    async def home_get():
+        return _home_state()
+
+    @app.put("/api/home")
+    async def home_set(h: HomeRequest):
+        _store().set_setting("home", {"lat": h.lat, "lon": h.lon, "name": h.name.strip() or "Home"})
+        return _home_state()
+
+    @app.delete("/api/home")
+    async def home_clear():
+        _store().set_setting("home", None)
+        return _home_state()
+
+    @app.put("/api/home/settings")
+    async def home_settings(h: HomeSettings):
+        _store().set_setting("start_from_home", h.start_from_home)
+        return _home_state()
+
+    @app.post("/api/route/pause")
+    async def route_pause():
+        await run(controller.pause_route())
+        return controller.status()
+
+    @app.post("/api/route/resume")
+    async def route_resume():
+        await run(controller.resume_route())
+        return controller.status()
+
+    @app.post("/api/route/speed")
+    async def route_speed(r: SpeedRequest):
+        await run(controller.set_route_speed(r.speed_kmh))
+        return controller.status()
+
+    # ----- saved routes -----
+    @app.get("/api/routes")
+    async def routes_list():
+        return _store().items("routes")
+
+    @app.post("/api/routes")
+    async def routes_add(r: SavedRoute):
+        return _store().add("routes", r.model_dump())
+
+    @app.put("/api/routes/{route_id}")
+    async def routes_update(route_id: str, r: SavedRoute):
+        saved = _store().update("routes", route_id, r.model_dump())
+        if saved is None:
+            raise HTTPException(404, "Saved route not found")
+        return saved
+
+    @app.delete("/api/routes/{route_id}")
+    async def routes_delete(route_id: str):
+        if not _store().remove("routes", route_id):
+            raise HTTPException(404, "Saved route not found")
+        return {"ok": True}
+
+    @app.post("/api/routes/{route_id}/play")
+    async def routes_play(route_id: str):
+        route = _store().get("routes", route_id)
+        if route is None:
+            raise HTTPException(404, "Saved route not found")
+        result = await run(play_saved_route(controller, route, fetch_json))
+        return {**result, "status": controller.status()}
+
+    # ----- schedules -----
+    def _with_last_run(entry: dict) -> dict:
+        return {**entry, "last_run": scheduler.last_runs.get(entry["id"])}
+
+    @app.get("/api/schedules")
+    async def schedules_list():
+        return [_with_last_run(e) for e in _store().items("schedules")]
+
+    @app.post("/api/schedules")
+    async def schedules_add(s: ScheduleIn):
+        return _with_last_run(_store().add("schedules", _check_schedule(s)))
+
+    @app.put("/api/schedules/{entry_id}")
+    async def schedules_update(entry_id: str, s: ScheduleIn):
+        saved = _store().update("schedules", entry_id, _check_schedule(s))
+        if saved is None:
+            raise HTTPException(404, "Schedule not found")
+        return _with_last_run(saved)
+
+    @app.delete("/api/schedules/{entry_id}")
+    async def schedules_delete(entry_id: str):
+        if not _store().remove("schedules", entry_id):
+            raise HTTPException(404, "Schedule not found")
+        return {"ok": True}
+
+    @app.post("/api/schedules/{entry_id}/run")
+    async def schedules_run(entry_id: str):
+        entry = _store().get("schedules", entry_id)
+        if entry is None:
+            raise HTTPException(404, "Schedule not found")
+        return await scheduler.run(entry)
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):
