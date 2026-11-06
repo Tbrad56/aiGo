@@ -216,6 +216,8 @@ docs/screenshots/
 
 ## Credits and licenses
 
-pymobiledevice3 is GPL-3.0, so if you distribute aiGo or a build of it, the GPL applies. Map data ©
+aiGo is free software under the **GNU General Public License v3.0 or later** (see [LICENSE](LICENSE)),
+matching pymobiledevice3, which it's built on. You can use, study, change and share it; if you
+distribute aiGo or a build of it, you must share the source under the same license. Map data ©
 OpenStreetMap contributors (ODbL). Routing by FOSSGIS OSRM. Search by Photon (komoot). Font:
 Bricolage Grotesque, SIL Open Font License (`aigo/static/fonts/OFL.txt`).
